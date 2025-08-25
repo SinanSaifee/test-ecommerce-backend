@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // --- FILE PATHS FOR DATA STORAGE ---
 const DATA_FILE = path.join(__dirname, 'products.json');
@@ -339,4 +339,5 @@ app.post('/api/logout', (req, res) => {
 // --- START THE SERVER ---
 app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
+
 });
