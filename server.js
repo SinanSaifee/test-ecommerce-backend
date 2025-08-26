@@ -3,18 +3,12 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// --- FILE PATHS FOR DATA STORAGE ---
-const DATA_FILE = path.join(__dirname, 'products.json');
-const USERS_FILE = path.join(__dirname, 'users.json');
-const ORDERS_FILE = path.join(__dirname, 'orders.json');
+const PORT = process.env.PORT || 3001;
 
 // --- SECRET KEY AND JWT EXPIRATION ---
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key_here';
@@ -25,6 +19,55 @@ const saltRounds = 10;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'adminpass';
 
+// --- MONGODB CONNECTION ---
+mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+})
+.then(() => console.log('✅ Connected to MongoDB Atlas'))
+.catch(err => console.error('❌ MongoDB connection error:', err));
+
+// --- SCHEMAS & MODELS ---
+const userSchema = new mongoose.Schema({
+    name: String,
+    email: { type: String, unique: true },
+    password: String,
+    role: { type: String, default: 'user' },
+    createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', userSchema);
+
+const productSchema = new mongoose.Schema({
+    name: { type: String, unique: true },
+    price: Number,
+    category: String,
+    description: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const Product = mongoose.model('Product', productSchema);
+
+const orderSchema = new mongoose.Schema({
+    user: {
+        name: String,
+        email: String,
+    },
+    items: [
+        {
+            productId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            price: Number,
+            quantity: Number
+        }
+    ],
+    shipping: Object,
+    payment: {
+        method: String,
+        status: String
+    },
+    createdAt: { type: Date, default: Date.now }
+});
+const Order = mongoose.model('Order', orderSchema);
+
 // --- MIDDLEWARE SETUP ---
 app.use(cors());
 app.use(express.json());
@@ -34,44 +77,13 @@ app.use(express.static('public'));
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-
-    if (token == null) {
-        return res.status(401).json({ message: 'Authentication token required.' });
-    }
+    if (!token) return res.status(401).json({ message: 'Authentication token required.' });
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            console.error('JWT verification error:', err.message);
-            return res.status(403).json({ message: 'Invalid or expired token.' });
-        }
+        if (err) return res.status(403).json({ message: 'Invalid or expired token.' });
         req.user = user;
         next();
     });
-}
-
-// --- HELPER FUNCTION TO READ FILES ---
-function readFile(filePath, callback) {
-    fs.readFile(filePath, 'utf8', (err, data) => {
-        if (err) {
-            if (err.code === 'ENOENT') {
-                return callback([]);
-            }
-            console.error(`Failed to read file ${filePath}:`, err);
-            return callback(null, err);
-        }
-        try {
-            const parsedData = JSON.parse(data);
-            callback(parsedData);
-        } catch (parseErr) {
-            console.error(`Failed to parse JSON from ${filePath}:`, parseErr);
-            callback(null, parseErr);
-        }
-    });
-}
-
-// --- HELPER FUNCTION TO WRITE FILES ---
-function writeFile(filePath, data, callback) {
-    fs.writeFile(filePath, JSON.stringify(data, null, 2), callback);
 }
 
 // =========================================================================
@@ -80,264 +92,190 @@ function writeFile(filePath, data, callback) {
 
 // --- PUBLIC ROUTES: AUTHENTICATION AND PRODUCTS ---
 
-// Route for user registration
-app.post('/api/register', (req, res) => {
+// Register
+app.post('/api/register', async (req, res) => {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
         return res.status(400).json({ success: false, message: 'All fields are required.' });
     }
 
-    readFile(USERS_FILE, users => {
-        if (!users) return res.status(500).json({ success: false, message: 'Server error.' });
-        const existingUser = users.find(u => u.email === email);
+    try {
+        const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(409).json({ success: false, message: 'Email already registered.' });
         }
 
-        bcrypt.hash(password, saltRounds, (err, hashedPassword) => {
-            if (err) {
-                console.error("Password hashing failed:", err);
-                return res.status(500).json({ success: false, message: 'Registration failed.' });
-            }
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-            const newUser = {
-                name,
-                email,
-                password: hashedPassword,
-                createdAt: new Date().toISOString(),
-                role: 'user'
-            };
+        const newUser = new User({ name, email, password: hashedPassword });
+        await newUser.save();
 
-            users.push(newUser);
-            writeFile(USERS_FILE, users, (err) => {
-                if (err) {
-                    return res.status(500).json({ success: false, message: 'Failed to save user data.' });
-                }
-                res.status(201).json({ success: true, message: 'Registration successful!' });
-            });
-        });
-    });
+        res.status(201).json({ success: true, message: 'Registration successful!' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
 });
 
-// Route for user login (including admin login)
-app.post('/api/login', (req, res) => {
+// Login
+app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
 
+    // --- Admin login via .env credentials ---
     if (email === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
         const user = { email: ADMIN_USERNAME, role: 'admin', name: 'Admin' };
         const accessToken = jwt.sign(user, JWT_SECRET, { expiresIn: JWT_EXPIRATION_TIME });
         return res.json({ success: true, token: accessToken, expires_in: JWT_EXPIRATION_TIME, user });
     }
 
-    readFile(USERS_FILE, users => {
-        if (!users) return res.status(500).json({ success: false, message: 'Server error.' });
-        const user = users.find(u => u.email === email);
-        if (!user) {
-            return res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
+    try {
+        const user = await User.findOne({ email });
+        if (!user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-        bcrypt.compare(password, user.password, (err, result) => {
-            if (err || !result) {
-                return res.status(401).json({ success: false, message: 'Invalid credentials' });
-            }
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-            const payload = {
-                email: user.email,
-                name: user.name,
-                role: user.role || 'user'
-            };
-            const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRATION_TIME });
-            res.json({ success: true, token: accessToken, expires_in: JWT_EXPIRATION_TIME, user: payload });
-        });
-    });
+        const payload = { email: user.email, name: user.name, role: user.role };
+        const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRATION_TIME });
+
+        res.json({ success: true, token: accessToken, expires_in: JWT_EXPIRATION_TIME, user: payload });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
 });
 
-// Route for getting a list of products (publicly accessible)
-app.get('/api/products', (req, res) => {
-    readFile(DATA_FILE, products => {
-        if (!products) return res.status(500).json({ error: 'Server error' });
-
+// Get products (with filters)
+app.get('/api/products', async (req, res) => {
+    try {
         const { category, minPrice, maxPrice, name } = req.query;
-        let filteredProducts = products;
+        let filter = {};
+        if (category) filter.category = category;
+        if (minPrice || maxPrice) filter.price = {};
+        if (minPrice) filter.price.$gte = parseFloat(minPrice);
+        if (maxPrice) filter.price.$lte = parseFloat(maxPrice);
+        if (name) filter.name = new RegExp(name, 'i');
 
-        if (category) filteredProducts = filteredProducts.filter(p => p.category === category);
-        if (minPrice) filteredProducts = filteredProducts.filter(p => p.price >= parseFloat(minPrice));
-        if (maxPrice) filteredProducts = filteredProducts.filter(p => p.price <= parseFloat(maxPrice));
-        if (name) {
-            const searchNameLower = name.toLowerCase();
-            filteredProducts = filteredProducts.filter(p => p.name.toLowerCase().includes(searchNameLower));
-        }
-        res.json(filteredProducts);
-    });
+        const products = await Product.find(filter);
+        res.json(products);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
 });
 
-// Route for user checkout (now handles both authenticated and guest users)
-app.post('/api/checkout', (req, res) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    let user = { name: 'Guest', email: 'guest@example.com' }; // Default guest user
+// Checkout (guest or logged in)
+app.post('/api/checkout', async (req, res) => {
+    const { cartItems, shippingInfo, paymentInfo } = req.body;
+    if (!cartItems?.length) return res.status(400).json({ success: false, message: 'Cart cannot be empty.' });
+    if (!shippingInfo) return res.status(400).json({ success: false, message: 'Shipping info required.' });
 
+    let user = { name: 'Guest', email: 'guest@example.com' };
+    const token = req.headers['authorization']?.split(' ')[1];
     if (token) {
         try {
             const decoded = jwt.verify(token, JWT_SECRET);
             user = { name: decoded.name, email: decoded.email };
-        } catch (err) {
-            // Invalid token, continue as guest
-            console.error('Invalid token for checkout, proceeding as guest:', err.message);
-        }
+        } catch {}
     }
 
-    const { cartItems, shippingInfo, paymentInfo } = req.body;
-
-    if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
-        return res.status(400).json({ success: false, message: 'Cart cannot be empty.' });
-    }
-    if (!shippingInfo || Object.keys(shippingInfo).length === 0) {
-        return res.status(400).json({ success: false, message: 'Shipping information is required.' });
-    }
-
-    const order = {
-        orderId: Date.now(),
-        user: {
-            email: user.email,
-            name: user.name,
-        },
-        items: cartItems,
-        shipping: shippingInfo,
-        payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' },
-        createdAt: new Date().toISOString()
-    };
-
-    readFile(ORDERS_FILE, orders => {
-        if (!orders) orders = [];
-        orders.push(order);
-        writeFile(ORDERS_FILE, orders, (err) => {
-            if (err) {
-                console.error("Failed to save order:", err);
-                return res.status(500).json({ success: false, message: 'Failed to place order.' });
-            }
-            console.log('New Order Received and Saved:', order.orderId);
-            res.json({ success: true, message: 'Checkout successful! Your order has been placed.' });
+    try {
+        const order = new Order({
+            user,
+            items: cartItems,
+            shipping: shippingInfo,
+            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' }
         });
-    });
+        await order.save();
+        res.json({ success: true, message: 'Checkout successful! Order placed.' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Failed to place order.' });
+    }
 });
 
 // --- PROTECTED ROUTES: ADMIN ACTIONS ---
-// (These routes remain unchanged and require a valid admin token)
 
-app.post('/api/products', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
-    }
-    const newProduct = req.body;
-    if (!newProduct.name || !newProduct.price || !newProduct.category) {
-        return res.status(400).json({ success: false, message: 'Product name, price, and category are required.' });
-    }
+// Add product
+app.post('/api/products', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
 
-    readFile(DATA_FILE, products => {
-        if (!products) return res.status(500).json({ error: 'Server error' });
-        const existingProduct = products.find(p => p.name === newProduct.name);
-        if (existingProduct) {
-            return res.status(409).json({ success: false, message: 'A product with this name already exists.' });
-        }
-        products.unshift(newProduct);
-        writeFile(DATA_FILE, products, (err) => {
-            if (err) return res.status(500).json({ error: 'Failed to write file' });
-            res.status(201).json({ message: 'Product added successfully' });
-        });
-    });
+    try {
+        const newProduct = new Product(req.body);
+        await newProduct.save();
+        res.status(201).json({ message: 'Product added successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to add product' });
+    }
 });
 
-app.delete('/api/products/:name', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
+// Delete product
+app.delete('/api/products/:name', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
+
+    try {
+        const result = await Product.deleteOne({ name: req.params.name });
+        if (result.deletedCount === 0) return res.status(404).json({ error: 'Product not found' });
+        res.json({ message: 'Product deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete product' });
     }
-    const nameToDelete = req.params.name;
-    readFile(DATA_FILE, products => {
-        if (!products) return res.status(500).json({ error: 'Server error' });
-        const filtered = products.filter(p => p.name !== nameToDelete);
-        if (filtered.length === products.length) {
-            return res.status(404).json({ error: 'Product not found' });
-        }
-        writeFile(DATA_FILE, filtered, (err) => {
-            if (err) return res.status(500).json({ error: 'Failed to write file' });
-            res.json({ message: 'Product deleted successfully' });
-        });
-    });
 });
 
-app.put('/api/products/:name', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
-    }
-    const nameToUpdate = req.params.name;
-    const updatedProduct = req.body;
+// Update product
+app.put('/api/products/:name', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
 
-    readFile(DATA_FILE, products => {
-        if (!products) return res.status(500).json({ error: 'Server error' });
-        const productIndex = products.findIndex(p => p.name === nameToUpdate);
-        if (productIndex === -1) {
-            return res.status(404).json({ error: 'Product not found' });
-        }
-        products[productIndex] = { ...products[productIndex], ...updatedProduct };
-        writeFile(DATA_FILE, products, (err) => {
-            if (err) return res.status(500).json({ error: 'Failed to write file' });
-            res.json({ message: 'Product updated successfully' });
-        });
-    });
+    try {
+        const product = await Product.findOneAndUpdate({ name: req.params.name }, req.body, { new: true });
+        if (!product) return res.status(404).json({ error: 'Product not found' });
+        res.json({ message: 'Product updated successfully', product });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update product' });
+    }
 });
 
-app.get('/api/users', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
+// Get all users
+app.get('/api/users', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
+
+    try {
+        const users = await User.find().select('-password'); // hide password
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Server error.' });
     }
-    readFile(USERS_FILE, users => {
-        if (!users) return res.status(500).json({ success: false, message: 'Server error.' });
-        const safeUsers = users.map(({ password, ...user }) => user);
-        res.json(safeUsers);
-    });
 });
 
-app.delete('/api/users/:email', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
+// Delete user
+app.delete('/api/users/:email', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
+
+    try {
+        const result = await User.deleteOne({ email: req.params.email });
+        if (result.deletedCount === 0) return res.status(404).json({ success: false, message: 'User not found.' });
+        res.json({ success: true, message: 'User deleted successfully.' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Failed to delete user.' });
     }
-    const emailToDelete = req.params.email;
-    readFile(USERS_FILE, users => {
-        if (!users) return res.status(500).json({ success: false, message: 'Server error.' });
-        const initialLength = users.length;
-        const filteredUsers = users.filter(user => user.email !== emailToDelete);
-
-        if (initialLength === filteredUsers.length) {
-            return res.status(404).json({ success: false, message: 'User not found.' });
-        }
-
-        writeFile(USERS_FILE, filteredUsers, (err) => {
-            if (err) {
-                console.error("Failed to delete user:", err);
-                return res.status(500).json({ success: false, message: 'Failed to delete user.' });
-            }
-            res.json({ success: true, message: 'User deleted successfully.' });
-        });
-    });
 });
 
-app.get('/api/orders', authenticateToken, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Access denied. Admin only.' });
-    }
-    readFile(ORDERS_FILE, orders => {
-        if (!orders) return res.status(500).json({ success: false, message: 'Server error.' });
+// Get all orders
+app.get('/api/orders', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin only.' });
+
+    try {
+        const orders = await Order.find();
         res.json(orders);
-    });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
 });
 
+// Logout
 app.post('/api/logout', (req, res) => {
     res.json({ success: true, message: 'Logged out successfully.' });
 });
 
 // --- START THE SERVER ---
 app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-
+    console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
