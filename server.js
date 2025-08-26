@@ -20,6 +20,7 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'adminpass';
 
 // --- MONGODB CONNECTION ---
+
 mongoose.connect(process.env.MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
@@ -178,19 +179,43 @@ app.post('/api/checkout', async (req, res) => {
     }
 
     try {
+        const orderItems = [];
+        let subtotal = 0;
+
+        for (let item of cartItems) {
+            const product = await Product.findById(item.productId);
+            if (!product) return res.status(404).json({ success: false, message: `Product not found: ${item.productId}` });
+
+            const itemTotal = product.price * item.quantity;
+            subtotal += itemTotal;
+
+            orderItems.push({
+                productId: product._id,
+                name: product.name,
+                price: product.price,
+                image: product.image, // secure, comes from DB
+                quantity: item.quantity
+            });
+        }
+
+        const total = subtotal + 2.0; // shipping
+
         const order = new Order({
             user,
-            items: cartItems,
+            items: orderItems,
             shipping: shippingInfo,
-            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' }
+            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' },
+            total
         });
+
         await order.save();
-        res.json({ success: true, message: 'Checkout successful! Order placed.' });
+        res.json({ success: true, message: 'Checkout successful! Order placed.', orderId: order._id });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Failed to place order.' });
     }
 });
+
 
 // --- PROTECTED ROUTES: ADMIN ACTIONS ---
 
