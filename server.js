@@ -179,43 +179,19 @@ app.post('/api/checkout', async (req, res) => {
     }
 
     try {
-        const orderItems = [];
-        let subtotal = 0;
-
-        for (let item of cartItems) {
-            const product = await Product.findById(item.productId);
-            if (!product) return res.status(404).json({ success: false, message: `Product not found: ${item.productId}` });
-
-            const itemTotal = product.price * item.quantity;
-            subtotal += itemTotal;
-
-            orderItems.push({
-                productId: product._id,
-                name: product.name,
-                price: product.price,
-                image: product.image, // secure, comes from DB
-                quantity: item.quantity
-            });
-        }
-
-        const total = subtotal + 2.0; // shipping
-
         const order = new Order({
             user,
-            items: orderItems,
+            items: cartItems,
             shipping: shippingInfo,
-            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' },
-            total
+            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' }
         });
-
         await order.save();
-        res.json({ success: true, message: 'Checkout successful! Order placed.', orderId: order._id });
+        res.json({ success: true, message: 'Checkout successful! Order placed.' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Failed to place order.' });
     }
 });
-
 
 // --- PROTECTED ROUTES: ADMIN ACTIONS ---
 
