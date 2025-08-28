@@ -35,11 +35,14 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// --- SCHEMAS & MODELS (Ensure these are correct) ---
 const productSchema = new mongoose.Schema({
     name: { type: String, unique: true },
     price: Number,
     category: String,
     description: String,
+    stock: Number,
+    image: String, // Ensure the 'image' field is here
     createdAt: { type: Date, default: Date.now }
 });
 const Product = mongoose.model('Product', productSchema);
@@ -51,10 +54,11 @@ const orderSchema = new mongoose.Schema({
     },
     items: [
         {
-            productId: mongoose.Schema.Types.ObjectId,
+            _id: mongoose.Schema.Types.ObjectId,
             name: String,
             price: Number,
-            quantity: Number
+            quantity: Number,
+            image: String, // Ensure the 'image' field is here to save the data
         }
     ],
     shipping: Object,
@@ -62,9 +66,11 @@ const orderSchema = new mongoose.Schema({
         method: String,
         status: String
     },
+    total: Number,
     createdAt: { type: Date, default: Date.now }
 });
 const Order = mongoose.model('Order', orderSchema);
+
 
 // --- MIDDLEWARE SETUP ---
 app.use(cors());
@@ -161,31 +167,74 @@ app.get('/api/products', async (req, res) => {
 });
 
 // Checkout (guest or logged in)
+// Checkout (guest or logged in)
 app.post('/api/checkout', async (req, res) => {
     const { cartItems, shippingInfo, paymentInfo } = req.body;
-    if (!cartItems?.length) return res.status(400).json({ success: false, message: 'Cart cannot be empty.' });
-    if (!shippingInfo) return res.status(400).json({ success: false, message: 'Shipping info required.' });
+    if (!cartItems || cartItems.length === 0) {
+        return res.status(400).json({ success: false, message: 'Cart cannot be empty.' });
+    }
+    if (!shippingInfo) {
+        return res.status(400).json({ success: false, message: 'Shipping info required.' });
+    }
 
+    // Determine user from token, or treat as guest
     let user = { name: 'Guest', email: 'guest@example.com' };
     const token = req.headers['authorization']?.split(' ')[1];
     if (token) {
         try {
             const decoded = jwt.verify(token, JWT_SECRET);
             user = { name: decoded.name, email: decoded.email };
-        } catch {}
+        } catch (err) {
+            console.error('Invalid token, processing as guest.', err.message);
+        }
     }
 
     try {
-        const order = new Order({
-            user,
-            items: cartItems,
-            shipping: shippingInfo,
-            payment: { method: paymentInfo?.method || 'Not Specified', status: 'Completed' }
+        const productIds = cartItems.map(item => item._id);
+        const productsFromDB = await Product.find({ '_id': { $in: productIds } });
+
+        // Map products for quick lookup
+        const dbProductsMap = new Map();
+        productsFromDB.forEach(product => {
+            dbProductsMap.set(product._id.toString(), product);
         });
-        await order.save();
-        res.json({ success: true, message: 'Checkout successful! Order placed.' });
+
+        const validatedCartItems = [];
+        let totalAmount = 0;
+
+        for (const cartItem of cartItems) {
+            const dbProduct = dbProductsMap.get(cartItem._id);
+            if (!dbProduct) {
+                return res.status(404).json({ success: false, message: `Product with ID ${cartItem._id} not found.` });
+            }
+            
+            // Add the 'image' field from the fetched product to the validated item
+            validatedCartItems.push({
+                _id: dbProduct._id,
+                name: dbProduct.name,
+                price: dbProduct.price,
+                quantity: cartItem.quantity,
+                image: dbProduct.image // <-- This line is crucial for saving the image
+            });
+            
+            totalAmount += dbProduct.price * cartItem.quantity;
+        }
+
+        const newOrder = new Order({
+            user,
+            items: validatedCartItems,
+            shipping: shippingInfo,
+            payment: {
+                method: paymentInfo?.method || 'Not Specified',
+                status: 'Completed'
+            },
+            total: totalAmount
+        });
+
+        await newOrder.save();
+        res.status(201).json({ success: true, message: 'Checkout successful! Order placed.', orderId: newOrder._id });
     } catch (err) {
-        console.error(err);
+        console.error('Checkout error:', err);
         res.status(500).json({ success: false, message: 'Failed to place order.' });
     }
 });
