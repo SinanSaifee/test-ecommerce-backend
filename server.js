@@ -35,9 +35,13 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
+const valueSchema = new mongoose.Schema({
+  name: String,
+  imageUrl: String,
+});
 const selectionSchema = new mongoose.Schema({
   name: String,
-  values: [String]
+  values: [valueSchema],
 });
 const productSchema = new mongoose.Schema({
   name: {
@@ -49,6 +53,7 @@ const productSchema = new mongoose.Schema({
   description: String,
   stock: Number,
   image: String,
+  smallImages: [String],
   selections: [selectionSchema],
   createdAt: {
     type: Date,
