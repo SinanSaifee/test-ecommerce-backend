@@ -35,9 +35,14 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
+// MODIFIED: Added price field to valueSchema
 const valueSchema = new mongoose.Schema({
   name: String,
   imageUrl: String,
+  price: {
+    type: Number,
+    default: 0
+  },
 });
 const selectionSchema = new mongoose.Schema({
   name: String,
@@ -214,6 +219,7 @@ app.get("/api/products", async (e, s) => {
   }
 });
 
+// MODIFIED: Checkout logic to handle variable pricing based on options
 app.post("/api/checkout", async (req, res) => {
   const {
     cartItems,
@@ -283,8 +289,22 @@ app.post("/api/checkout", async (req, res) => {
         });
       }
 
-      // Price validation using the backend price
-      const verifiedPrice = dbProduct.price;
+      // MODIFIED: Price validation logic
+      let verifiedPrice = dbProduct.price;
+
+      // Check if the item has selected options and find the correct price
+      if (item.selectedOptions && Object.keys(item.selectedOptions).length > 0 && dbProduct.selections) {
+        for (const selection of dbProduct.selections) {
+          const selectedValueName = item.selectedOptions[selection.name]?.name;
+          if (selectedValueName) {
+            const selectedValue = selection.values.find(v => v.name === selectedValueName);
+            if (selectedValue && selectedValue.price !== undefined) {
+              verifiedPrice = selectedValue.price;
+              break;
+            }
+          }
+        }
+      }
 
       processedItems.push({
         _id: dbProduct._id,
