@@ -54,6 +54,7 @@ const productSchema = new mongoose.Schema({
     unique: true
   },
   price: Number,
+  discount:String,
   category: String,
   description: String,
   stock: Number,
@@ -64,6 +65,7 @@ const productSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+   // ADDED: discountPrice field
 });
 const Product = mongoose.model("Product", productSchema);
 
